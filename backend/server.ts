@@ -3,199 +3,208 @@ import cors from "cors";
 import dotenv from "dotenv";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import sql, { connectDB } from "./db";
+import { getPool } from "./db";
 
 dotenv.config();
 
 const app = express();
-app.use(cors());
 app.use(express.json());
 
-const PORT = Number(process.env.PORT) || 5000;
+// ✅ CORS: allow your Static Web App + local dev
+const allowedOrigins = [
+  "http://localhost:8080",
+  "http://localhost:5173",
+  process.env.FRONTEND_ORIGIN || ""
+].filter(Boolean);
 
-function mustEnv(name: string): string {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing environment variable: ${name}`);
-  return v;
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      // allow server-to-server/no-origin calls
+      if (!origin) return cb(null, true);
+      if (allowedOrigins.includes(origin)) return cb(null, true);
+      return cb(new Error(`CORS blocked for origin: ${origin}`));
+    }
+  })
+);
+
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 5000;
+const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
+
+// ---------- helpers ----------
+function signToken(user: { id: number; email: string; full_name: string }) {
+  return jwt.sign(
+    { userId: user.id, email: user.email, name: user.full_name },
+    JWT_SECRET,
+    { expiresIn: "2h" }
+  );
 }
 
-const JWT_SECRET = mustEnv("JWT_SECRET");
-
-// Root
-app.get("/", (req, res) => {
+// ---------- routes ----------
+app.get("/", (_req, res) => {
   res.send("Hotel Backend Running 🚀");
 });
 
-// DB test
-app.get("/api/dbtest", async (req, res) => {
+app.get("/api/dbtest", async (_req, res) => {
   try {
-    const result = await sql.query`SELECT GETDATE() as now`;
+    const pool = await getPool();
+    const result = await pool.request().query("SELECT GETDATE() as now");
     res.json(result.recordset[0]);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "DB query failed" });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || "DB error" });
   }
 });
 
-// Create Users table if missing (demo-safe)
-async function ensureUsersTable() {
-  await sql.query`
-    IF OBJECT_ID('dbo.Users', 'U') IS NULL
-    BEGIN
-      CREATE TABLE dbo.Users (
-        id INT IDENTITY(1,1) PRIMARY KEY,
-        full_name NVARCHAR(100) NOT NULL,
-        email NVARCHAR(150) NOT NULL UNIQUE,
-        password_hash NVARCHAR(255) NOT NULL,
-        created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
-      );
-    END
-  `;
+// Create tables if not exist
+async function ensureTables() {
+  const pool = await getPool();
+
+  await pool.request().query(`
+    IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='Users' AND xtype='U')
+    CREATE TABLE dbo.Users (
+      id INT IDENTITY(1,1) PRIMARY KEY,
+      full_name NVARCHAR(200) NOT NULL,
+      email NVARCHAR(255) NOT NULL UNIQUE,
+      password_hash NVARCHAR(255) NOT NULL,
+      created_at DATETIME2 NOT NULL DEFAULT GETUTCDATE()
+    );
+  `);
+
+  await pool.request().query(`
+    IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='Rooms' AND xtype='U')
+    CREATE TABLE dbo.Rooms (
+      id INT IDENTITY(1,1) PRIMARY KEY,
+      room_number NVARCHAR(50) NOT NULL UNIQUE,
+      type NVARCHAR(100) NOT NULL,
+      price INT NOT NULL,
+      is_available BIT NOT NULL DEFAULT 1
+    );
+  `);
 }
 
-// ---------- AUTH: REGISTER ----------
+// Seed rooms (demo)
+app.post("/api/rooms/seed", async (_req, res) => {
+  try {
+    const pool = await getPool();
+
+    await pool.request().query(`
+      IF NOT EXISTS (SELECT 1 FROM dbo.Rooms)
+      BEGIN
+        INSERT INTO dbo.Rooms (room_number, type, price, is_available) VALUES
+          ('101', 'Single', 50, 1),
+          ('102', 'Double', 80, 1),
+          ('201', 'Suite', 150, 1);
+      END
+    `);
+
+    res.json({ message: "Rooms seeded successfully ✅" });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || "Seed error" });
+  }
+});
+
+app.get("/api/rooms", async (_req, res) => {
+  try {
+    const pool = await getPool();
+    const result = await pool.request().query("SELECT * FROM dbo.Rooms ORDER BY id DESC");
+    res.json(result.recordset);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || "Rooms error" });
+  }
+});
+
+// AUTH: Register
 app.post("/api/auth/register", async (req, res) => {
   try {
-    await ensureUsersTable();
-
-    const { fullName, email, password } = req.body as {
-      fullName?: string;
-      email?: string;
-      password?: string;
-    };
+    const { fullName, email, password } = req.body || {};
 
     if (!fullName || !email || !password) {
-      return res.status(400).json({ error: "fullName, email, password are required" });
+      return res.status(400).json({ error: "fullName, email and password are required" });
     }
 
-    const existing = await sql.query`
-      SELECT TOP 1 id FROM dbo.Users WHERE email = ${email}
-    `;
+    const pool = await getPool();
+
+    // check if email already exists
+    const existing = await pool
+      .request()
+      .input("email", email)
+      .query("SELECT TOP 1 id FROM dbo.Users WHERE email = @email");
+
     if (existing.recordset.length > 0) {
       return res.status(409).json({ error: "Email already registered" });
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
 
-    const inserted = await sql.query`
-      INSERT INTO dbo.Users (full_name, email, password_hash)
-      OUTPUT INSERTED.id, INSERTED.full_name, INSERTED.email, INSERTED.created_at
-      VALUES (${fullName}, ${email}, ${passwordHash})
-    `;
+    const inserted = await pool
+      .request()
+      .input("full_name", fullName)
+      .input("email", email)
+      .input("password_hash", passwordHash)
+      .query(`
+        INSERT INTO dbo.Users (full_name, email, password_hash)
+        OUTPUT INSERTED.id, INSERTED.full_name, INSERTED.email, INSERTED.created_at
+        VALUES (@full_name, @email, @password_hash)
+      `);
 
-    return res.status(201).json({
-      message: "Registered successfully",
-      user: inserted.recordset[0]
-    });
+    return res.json({ message: "Registered successfully", user: inserted.recordset[0] });
   } catch (err: any) {
-    console.error(err);
-    return res.status(500).json({ error: "Register failed", details: err?.message || String(err) });
+    return res.status(500).json({ error: err.message || "Register error" });
   }
 });
 
-// ---------- AUTH: LOGIN ----------
+// AUTH: Login
 app.post("/api/auth/login", async (req, res) => {
   try {
-    await ensureUsersTable();
-
-    const { email, password } = req.body as { email?: string; password?: string };
+    const { email, password } = req.body || {};
 
     if (!email || !password) {
       return res.status(400).json({ error: "email and password are required" });
     }
 
-    const result = await sql.query`
-      SELECT TOP 1 id, full_name, email, password_hash
-      FROM dbo.Users
-      WHERE email = ${email}
-    `;
+    const pool = await getPool();
+
+    const result = await pool
+      .request()
+      .input("email", email)
+      .query(`
+        SELECT TOP 1 id, full_name, email, password_hash
+        FROM dbo.Users
+        WHERE email = @email
+      `);
 
     if (result.recordset.length === 0) {
       return res.status(401).json({ error: "Invalid email or password" });
     }
 
-    const user = result.recordset[0] as {
-      id: number;
-      full_name: string;
-      email: string;
-      password_hash: string;
-    };
+    const user = result.recordset[0];
 
     const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) {
-      return res.status(401).json({ error: "Invalid email or password" });
-    }
+    if (!ok) return res.status(401).json({ error: "Invalid email or password" });
 
-    const token = jwt.sign(
-      { userId: user.id, email: user.email, name: user.full_name },
-      JWT_SECRET,
-      { expiresIn: "1h" }
-    );
+    const token = signToken(user);
 
     return res.json({
       message: "Login successful",
       token,
-      user: { id: user.id, fullName: user.full_name, email: user.email }
+      user: { id: user.id, full_name: user.full_name, email: user.email }
     });
   } catch (err: any) {
-    console.error(err);
-    return res.status(500).json({ error: "Login failed", details: err?.message || String(err) });
+    return res.status(500).json({ error: err.message || "Login error" });
   }
 });
 
-// ---------- ROOMS (optional demo endpoints) ----------
-async function ensureRoomsTable() {
-  await sql.query`
-    IF OBJECT_ID('dbo.Rooms', 'U') IS NULL
-    BEGIN
-      CREATE TABLE dbo.Rooms (
-        id INT IDENTITY(1,1) PRIMARY KEY,
-        room_number NVARCHAR(10) NOT NULL,
-        type NVARCHAR(50) NOT NULL,
-        price DECIMAL(10,2) NOT NULL,
-        is_available BIT DEFAULT 1
-      );
-    END
-  `;
-}
-
-app.get("/api/rooms", async (req, res) => {
+// ---------- start ----------
+(async () => {
   try {
-    await ensureRoomsTable();
-    const rooms = await sql.query`
-      SELECT id, room_number, type, price, is_available
-      FROM dbo.Rooms
-      ORDER BY id DESC
-    `;
-    res.json(rooms.recordset);
-  } catch (err: any) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to fetch rooms", details: err?.message || String(err) });
+    await getPool();
+    console.log("✅ Connected to Azure SQL Database");
+    await ensureTables();
+  } catch (err) {
+    console.error("❌ Database connection failed:", err);
   }
-});
 
-app.post("/api/rooms/seed", async (req, res) => {
-  try {
-    await ensureRoomsTable();
-    await sql.query`
-      INSERT INTO dbo.Rooms (room_number, type, price, is_available)
-      VALUES
-        ('101', 'Single', 50.00, 1),
-        ('102', 'Double', 80.00, 1),
-        ('201', 'Suite', 150.00, 1)
-    `;
-    res.json({ message: "Rooms seeded successfully ✅" });
-  } catch (err: any) {
-    console.error(err);
-    res.status(500).json({ error: "Seed failed", details: err?.message || String(err) });
-  }
-});
-
-// Start server after DB connect
-connectDB()
-  .then(() => {
-    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-  })
-  .catch(() => {
-    console.log("Server not started because DB connection failed.");
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
   });
+})();
