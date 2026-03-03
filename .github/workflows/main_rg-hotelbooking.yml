@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_WEBAPP_NAME: rg-hotelbooking-fkcqbvhbqdgc6ep
+  AZURE_WEBAPP_NAME: RG-HotelBooking
   NODE_VERSION: "20.x"
 
 jobs:
@@ -38,3 +38,4 @@ jobs:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           package: backend.zip
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
+
