@@ -4,7 +4,7 @@ import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/lib/authContext";
-import { mockApi } from "@/lib/mockData";
+import { loginUser } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
 import { Eye, EyeOff } from "lucide-react";
 
@@ -20,10 +20,8 @@ const Login = () => {
 
   const validate = () => {
     const e: Record<string, string> = {};
-    if (!email.trim()) e.email = "Email is required";
-    else if (!/\S+@\S+\.\S+/.test(email)) e.email = "Invalid email";
-    if (!password) e.password = "Password is required";
-    else if (password.length < 6) e.password = "Min 6 characters";
+    if (!email.trim()) e.email = "Email required";
+    if (!password) e.password = "Password required";
     setErrors(e);
     return Object.keys(e).length === 0;
   };
@@ -31,14 +29,28 @@ const Login = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!validate()) return;
+
     setLoading(true);
     try {
-      const { user } = await mockApi.login(email, password);
-      login({ ...user, role: email.includes("admin") ? "admin" : "guest" });
-      toast({ title: "Welcome back!", description: `Signed in as ${user.name}` });
-      navigate(email.includes("admin") ? "/admin" : "/dashboard");
-    } catch {
-      toast({ title: "Login failed", variant: "destructive" });
+      const data = await loginUser(email, password);
+
+      localStorage.setItem("token", data.token);
+
+      login({
+        id: data.user.id,
+        name: data.user.full_name,
+        email: data.user.email,
+        role: "guest"
+      });
+
+      toast({ title: "Login successful 🎉" });
+
+      navigate("/dashboard");
+    } catch (err: any) {
+      toast({
+        title: err.message || "Login failed",
+        variant: "destructive"
+      });
     } finally {
       setLoading(false);
     }
@@ -46,50 +58,34 @@ const Login = () => {
 
   return (
     <div className="pt-24 pb-16 min-h-screen flex items-center justify-center">
-      <motion.div
-        initial={{ opacity: 0, y: 30 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="w-full max-w-md mx-4"
-      >
+      <motion.div initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} className="w-full max-w-md mx-4">
         <div className="bg-card rounded-xl shadow-luxury p-8">
           <div className="text-center mb-8">
-            <h1 className="font-display text-3xl font-bold text-foreground">Welcome Back</h1>
-            <p className="font-body text-sm text-muted-foreground mt-2">Sign in to your account</p>
+            <h1 className="font-display text-3xl font-bold">Login</h1>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-5">
-            <div>
-              <label className="font-body text-xs uppercase tracking-wider text-muted-foreground mb-2 block">Email</label>
-              <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" className="font-body" />
-              {errors.email && <p className="text-destructive text-xs mt-1 font-body">{errors.email}</p>}
+            <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
+            <div className="relative">
+              <Input
+                type={showPw ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Password"
+                className="pr-10"
+              />
+              <button type="button" onClick={() => setShowPw(!showPw)} className="absolute right-3 top-1/2 -translate-y-1/2">
+                {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
             </div>
-            <div>
-              <label className="font-body text-xs uppercase tracking-wider text-muted-foreground mb-2 block">Password</label>
-              <div className="relative">
-                <Input
-                  type={showPw ? "text" : "password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="font-body pr-10"
-                />
-                <button type="button" onClick={() => setShowPw(!showPw)} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground">
-                  {showPw ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </button>
-              </div>
-              {errors.password && <p className="text-destructive text-xs mt-1 font-body">{errors.password}</p>}
-            </div>
-            <Button type="submit" size="lg" className="w-full bg-accent text-accent-foreground hover:bg-accent/90 font-body" disabled={loading}>
+
+            <Button type="submit" className="w-full" disabled={loading}>
               {loading ? "Signing in..." : "Sign In"}
             </Button>
           </form>
 
-          <p className="text-center mt-6 font-body text-sm text-muted-foreground">
-            Don't have an account?{" "}
-            <Link to="/register" className="text-accent hover:underline font-medium">Register</Link>
-          </p>
-          <p className="text-center mt-3 font-body text-xs text-muted-foreground">
-            Tip: Use an email with "admin" to log in as admin
+          <p className="text-center mt-6 text-sm">
+            Don’t have an account? <Link to="/register" className="text-accent">Register</Link>
           </p>
         </div>
       </motion.div>
