@@ -13,13 +13,13 @@ app.use(express.json());
 
 const PORT = Number(process.env.PORT) || 5000;
 
-function requireEnv(name: string): string {
+function mustEnv(name: string): string {
   const v = process.env[name];
-  if (!v) throw new Error(`Missing env var: ${name}`);
+  if (!v) throw new Error(`Missing environment variable: ${name}`);
   return v;
 }
 
-const JWT_SECRET = requireEnv("JWT_SECRET");
+const JWT_SECRET = mustEnv("JWT_SECRET");
 
 // Root
 app.get("/", (req, res) => {
@@ -37,9 +37,27 @@ app.get("/api/dbtest", async (req, res) => {
   }
 });
 
+// Create Users table if missing (demo-safe)
+async function ensureUsersTable() {
+  await sql.query`
+    IF OBJECT_ID('dbo.Users', 'U') IS NULL
+    BEGIN
+      CREATE TABLE dbo.Users (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        full_name NVARCHAR(100) NOT NULL,
+        email NVARCHAR(150) NOT NULL UNIQUE,
+        password_hash NVARCHAR(255) NOT NULL,
+        created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+      );
+    END
+  `;
+}
+
 // ---------- AUTH: REGISTER ----------
 app.post("/api/auth/register", async (req, res) => {
   try {
+    await ensureUsersTable();
+
     const { fullName, email, password } = req.body as {
       fullName?: string;
       email?: string;
@@ -50,7 +68,6 @@ app.post("/api/auth/register", async (req, res) => {
       return res.status(400).json({ error: "fullName, email, password are required" });
     }
 
-    // check if exists
     const existing = await sql.query`
       SELECT TOP 1 id FROM dbo.Users WHERE email = ${email}
     `;
@@ -68,7 +85,7 @@ app.post("/api/auth/register", async (req, res) => {
 
     return res.status(201).json({
       message: "Registered successfully",
-      user: inserted.recordset[0],
+      user: inserted.recordset[0]
     });
   } catch (err: any) {
     console.error(err);
@@ -79,6 +96,8 @@ app.post("/api/auth/register", async (req, res) => {
 // ---------- AUTH: LOGIN ----------
 app.post("/api/auth/login", async (req, res) => {
   try {
+    await ensureUsersTable();
+
     const { email, password } = req.body as { email?: string; password?: string };
 
     if (!email || !password) {
@@ -116,7 +135,7 @@ app.post("/api/auth/login", async (req, res) => {
     return res.json({
       message: "Login successful",
       token,
-      user: { id: user.id, fullName: user.full_name, email: user.email },
+      user: { id: user.id, fullName: user.full_name, email: user.email }
     });
   } catch (err: any) {
     console.error(err);
@@ -124,23 +143,25 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
-// ---------- ROOMS ----------
+// ---------- ROOMS (optional demo endpoints) ----------
+async function ensureRoomsTable() {
+  await sql.query`
+    IF OBJECT_ID('dbo.Rooms', 'U') IS NULL
+    BEGIN
+      CREATE TABLE dbo.Rooms (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        room_number NVARCHAR(10) NOT NULL,
+        type NVARCHAR(50) NOT NULL,
+        price DECIMAL(10,2) NOT NULL,
+        is_available BIT DEFAULT 1
+      );
+    END
+  `;
+}
+
 app.get("/api/rooms", async (req, res) => {
   try {
-    // Create table if missing (demo-friendly)
-    await sql.query`
-      IF OBJECT_ID('dbo.Rooms', 'U') IS NULL
-      BEGIN
-        CREATE TABLE dbo.Rooms (
-          id INT IDENTITY(1,1) PRIMARY KEY,
-          room_number NVARCHAR(10) NOT NULL,
-          type NVARCHAR(50) NOT NULL,
-          price DECIMAL(10,2) NOT NULL,
-          is_available BIT DEFAULT 1
-        );
-      END
-    `;
-
+    await ensureRoomsTable();
     const rooms = await sql.query`
       SELECT id, room_number, type, price, is_available
       FROM dbo.Rooms
@@ -155,19 +176,7 @@ app.get("/api/rooms", async (req, res) => {
 
 app.post("/api/rooms/seed", async (req, res) => {
   try {
-    await sql.query`
-      IF OBJECT_ID('dbo.Rooms', 'U') IS NULL
-      BEGIN
-        CREATE TABLE dbo.Rooms (
-          id INT IDENTITY(1,1) PRIMARY KEY,
-          room_number NVARCHAR(10) NOT NULL,
-          type NVARCHAR(50) NOT NULL,
-          price DECIMAL(10,2) NOT NULL,
-          is_available BIT DEFAULT 1
-        );
-      END
-    `;
-
+    await ensureRoomsTable();
     await sql.query`
       INSERT INTO dbo.Rooms (room_number, type, price, is_available)
       VALUES
